@@ -1,12 +1,16 @@
 import 'package:flutter/material.dart';
 import '../configuracoes/configuracoes_screen.dart';
 import '../../api/ativos_cache_service.dart';
+import '../../api/google_sheets_service.dart';
 import '../../models/ativo.dart';
 import '../../services/bolsa_storage_service.dart';
 import 'package:flutter_colorpicker/flutter_colorpicker.dart';
 import 'package:flutter/services.dart'; // Importa para inputFormatters
 import 'dart:async';
 import 'grafico_bolsa.dart';
+import 'rebalance.dart';
+import 'package:intl/intl.dart';
+import 'bolsa_historico.dart';
 
 class BolsaScreen extends StatefulWidget {
   const BolsaScreen({super.key});
@@ -24,6 +28,10 @@ class _BolsaScreenState extends State<BolsaScreen> {
   Set<String> _expandedCards = {};
   Timer? _autoUpdateTimer;
   DateTime? _lastManualUpdate;
+  final PageController _carouselController = PageController();
+  int _currentPage = 0;
+  List<String> _tickersDisponiveis = [];
+  bool _isLoadingTickers = false;
 
   // Adicione uma lista de classes disponíveis
   List<ClasseAtivo> _classes = [
@@ -34,20 +42,22 @@ class _BolsaScreenState extends State<BolsaScreen> {
     ClasseAtivo(nome: 'Outro', cor: Colors.grey, icone: Icons.category),
   ];
 
-  final List<String> _tickersDisponiveis = [
-    'BBAS3', 'BBDC4', 'HGLG11', 'PETR4', 'ITUB4', 'MGLU3', 'HAPV3', 'KNRI11', 'IVVB11', 'BOVA11'
-  ];
+  // Adicionar variáveis de estado:
+  ClasseAtivo? _classeSelecionada;
+
 
   @override
   void initState() {
     super.initState();
     _loadAtivos();
     _startAutoUpdateTimer();
+    _loadTickersFromPlanilha();
   }
 
   @override
   void dispose() {
     _autoUpdateTimer?.cancel();
+    _carouselController.dispose();
     super.dispose();
   }
 
@@ -129,46 +139,97 @@ class _BolsaScreenState extends State<BolsaScreen> {
       ),
       body: _isLoading
           ? const Center(child: CircularProgressIndicator())
-          : Column(
+          : GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => FocusScope.of(context).unfocus(),
+              child: Column(
                 children: [
-                // Gráfico de pizza
-                GraficoBolsa(classes: _classes),
-                // Lista de classes
-                              Expanded(
-                    child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16.0),
-                    child: ListView(
-                      children: _classes.map((classe) {
-                        return ExpansionTile(
-                          leading: CircleAvatar(
-                            backgroundColor: classe.cor.withOpacity(0.15),
-                            child: Icon(classe.icone, color: classe.cor),
-                          ),
-                          title: Text(
-                            classe.nome,
-                            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: classe.cor),
-                          ),
-                          subtitle: Padding(
-                            padding: const EdgeInsets.only(top: 4.0),
-                            child: Text(
-                              'Mercado: R\$ ' + _valorTotalMercado(classe).toStringAsFixed(2).replaceAll('.', ','),
-                              style: TextStyle(fontSize: 13, color: classe.cor, fontWeight: FontWeight.bold),
-                            ),
-                          ),
-                            children: [
-                            ...classe.ativos.map((ativo) => _buildAtivoCard(ativo)).toList(),
-                            TextButton.icon(
-                              onPressed: () => _showAddAtivoDialog(classe),
-                              icon: const Icon(Icons.add),
-                              label: const Text('Adicionar Ativo'),
-                            ),
-                          ],
-                        );
-                      }).toList(),
+                  // Carrossel com gráfico e histórico
+                  Container(
+                    height: 300,
+                    child: PageView(
+                      controller: _carouselController,
+                      onPageChanged: (index) {
+                        setState(() {
+                          _currentPage = index;
+                        });
+                      },
+                        children: [
+                        // Página 1: Gráfico de pizza
+                        GraficoBolsa(classes: _classes),
+                        // Página 2: Gráfico de linhas total
+                        BolsaHistoricoGrafico(classes: _classes),
+                      ],
                     ),
-                                  ),
+                  ),
+                  // Indicadores de página
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 8.0),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Container(
+                          width: 8,
+                          height: 8,
+                          margin: const EdgeInsets.symmetric(horizontal: 4),
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: _currentPage == 0 ? Colors.blue : Colors.grey.withOpacity(0.3),
+                          ),
+                        ),
+                        Container(
+                          width: 8,
+                          height: 8,
+                          margin: const EdgeInsets.symmetric(horizontal: 4),
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: _currentPage == 1 ? Colors.blue : Colors.grey.withOpacity(0.3),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  // Remover qualquer Padding/Wrap/ListView/Chip relacionado a _tickersDisponiveis na tela principal
+                  // Lista de classes
+                  Expanded(
+                      child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                      child: ListView(
+                          children: [
+                          ..._classes.map((classe) {
+                            return ExpansionTile(
+                              leading: CircleAvatar(
+                                backgroundColor: classe.cor.withOpacity(0.15),
+                                child: Icon(classe.icone, color: classe.cor),
+                              ),
+                              title: Text(
+                                classe.nome,
+                                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: classe.cor),
+                              ),
+                              subtitle: Padding(
+                                padding: const EdgeInsets.only(top: 4.0),
+                                child: Text(
+                                  'Mercado: ' + formatarReais(_valorTotalMercado(classe)),
+                                  style: TextStyle(fontSize: 13, color: classe.cor, fontWeight: FontWeight.bold),
+                                ),
+                              ),
+                                        children: [
+                                ...classe.ativos.map((ativo) => _buildAtivoCard(ativo)).toList(),
+                                TextButton.icon(
+                                  onPressed: () => _showAddAtivoDialog(classe),
+                                  icon: const Icon(Icons.add),
+                                  label: const Text('Adicionar Ativo'),
                                 ),
                               ],
+                            );
+                          }).toList(),
+                          RebalanceContainer(classes: _classes),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
     );
   }
@@ -809,18 +870,11 @@ class _BolsaScreenState extends State<BolsaScreen> {
             ),
             TextButton(
               onPressed: () {
-                // 2. No update, encontre o ativo na lista da ClasseAtivo e atualize os campos diretamente.
+                print('🗑️ Botão Excluir pressionado para ativo: ${ativo.ticker}');
                 final classeAtual = _classes.firstWhere((c) => c.ativos.any((a) => a.ticker == ativo.ticker));
-                final index = classeAtual.ativos.indexWhere((a) => a.ticker == ativo.ticker);
-                if (index != -1) {
-                  classeAtual.ativos[index] = Ativo(
-                    ticker: ativo.ticker,
-                    quantidade: quantidadeController.text.trim(),
-                    precoMedio: precoMedioController.text.trim(),
-                    precoAtual: precoController.text.trim(),
-                  );
-                }
-                _deleteAtivo(classeAtual, ativo); // 3. No delete, remova o ativo da lista da ClasseAtivo.
+                print('🗑️ Classe encontrada: ${classeAtual.nome}');
+                _deleteAtivo(classeAtual, ativo);
+                _saveData();
                 Navigator.of(context).pop();
               },
               child: const Text('Excluir', style: TextStyle(color: Colors.red)),
@@ -919,11 +973,16 @@ class _BolsaScreenState extends State<BolsaScreen> {
   }
 
   void _deleteAtivo(ClasseAtivo classe, Ativo ativo) {
+    print('🗑️ Iniciando exclusão do ativo: ${ativo.ticker}');
+    print('🗑️ Classe antes da exclusão: ${classe.nome} com ${classe.ativos.length} ativos');
+    
     setState(() {
       classe.ativos.remove(ativo);
       _ativos.removeWhere((a) => a.ticker == ativo.ticker);
       _ativosFiltrados.removeWhere((a) => a.ticker == ativo.ticker);
     });
+    
+    print('🗑️ Classe após a exclusão: ${classe.nome} com ${classe.ativos.length} ativos');
 
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -967,6 +1026,12 @@ class _BolsaScreenState extends State<BolsaScreen> {
       }
     }
     return total;
+  }
+
+  // Adicionar função utilitária para formatar reais
+  String formatarReais(double valor) {
+    final formatador = NumberFormat.simpleCurrency(locale: 'pt_BR', decimalDigits: 2);
+    return formatador.format(valor);
   }
 
   // 3. Método para mostrar o diálogo de gerenciamento de classes
@@ -1132,13 +1197,15 @@ class _BolsaScreenState extends State<BolsaScreen> {
                                             const SizedBox(height: 8),
                                             GestureDetector(
                                               onTap: () async {
-                                                final icons = [
+                                                final todosIcones = [
                                                   Icons.show_chart, Icons.domain, Icons.pie_chart, 
                                                   Icons.language, Icons.category, Icons.currency_bitcoin,
                                                   Icons.account_balance, Icons.trending_up, Icons.attach_money,
                                                   Icons.savings, Icons.credit_card, Icons.account_balance_wallet
                                                 ];
-                                                
+                                                final iconesUsados = _classes.map((c) => c.icone).toList();
+                                                final icons = todosIcones.where((icon) => !iconesUsados.contains(icon)).toList();
+
                                                 final picked = await showDialog<IconData>(
                                                   context: context,
                                                   builder: (context) {
@@ -1336,7 +1403,7 @@ class _BolsaScreenState extends State<BolsaScreen> {
                                               style: const TextStyle(fontSize: 13),
                                             ),
                                             Text(
-                                              'R\$ ${_valorTotalMercado(classe).toStringAsFixed(2).replaceAll('.', ',')}',
+                                              'R\$ ' + formatarReais(_valorTotalMercado(classe)),
                   style: TextStyle(
                                                 fontSize: 14,
                                                 fontWeight: FontWeight.bold,
@@ -1394,7 +1461,39 @@ class _BolsaScreenState extends State<BolsaScreen> {
     );
   }
 
-  void _showAddAtivoDialog(ClasseAtivo classe) {
+  Future<void> _loadTickersFromPlanilha() async {
+    setState(() {
+      _isLoadingTickers = true;
+    });
+    try {
+      final tickers = await GoogleSheetsService.getAtivosTickers();
+      setState(() {
+        _tickersDisponiveis = tickers;
+        _isLoadingTickers = false;
+      });
+    } catch (e) {
+      setState(() {
+        _isLoadingTickers = false;
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Erro ao carregar tickers: $e'), backgroundColor: Colors.red),
+        );
+      }
+    }
+  }
+
+  void _showAddAtivoDialog(ClasseAtivo classe) async {
+    if (_tickersDisponiveis.isEmpty) {
+      // Mostra loading até carregar os tickers
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => const Center(child: CircularProgressIndicator()),
+      );
+      await _loadTickersFromPlanilha();
+      Navigator.of(context).pop(); // Fecha o loading
+    }
     final precoController = TextEditingController(text: '0,00');
     final quantidadeController = TextEditingController(text: '0');
     final precoMedioController = TextEditingController(text: '0,00');
@@ -1436,9 +1535,6 @@ class _BolsaScreenState extends State<BolsaScreen> {
                 const SizedBox(height: 16),
                 Autocomplete<String>(
                   optionsBuilder: (TextEditingValue textEditingValue) {
-                    if (textEditingValue.text == '') {
-                      return const Iterable<String>.empty();
-                    }
                     return _tickersDisponiveis.where((String option) {
                       return option.toLowerCase().contains(textEditingValue.text.toLowerCase());
                     });

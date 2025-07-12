@@ -6,6 +6,7 @@ import '../models/ativo.dart';
 class BolsaStorageService {
   static const String _classesKey = 'bolsa_classes';
   static const String _ativosKey = 'bolsa_ativos';
+  static const String _rebalancePercentuaisKey = 'rebalance_percentuais';
 
   // Salvar classes de ativos
   static Future<void> saveClasses(List<ClasseAtivo> classes) async {
@@ -95,5 +96,31 @@ class BolsaStorageService {
     } catch (e) {
       return false;
     }
+  }
+
+  // Salvar percentuais alvo do rebalanceamento
+  static Future<void> saveRebalancePercentuais(List<double> percentuais) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final percentuaisStr = percentuais.map((e) => e.toString()).toList();
+      await prefs.setStringList(_rebalancePercentuaisKey, percentuaisStr);
+      print('💾 Percentuais de rebalanceamento salvos');
+    } catch (e) {
+      print('❌ Erro ao salvar percentuais de rebalanceamento: $e');
+    }
+  }
+
+  // Carregar percentuais alvo do rebalanceamento
+  static Future<List<double>?> loadRebalancePercentuais() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final percentuaisStr = prefs.getStringList(_rebalancePercentuaisKey);
+      if (percentuaisStr != null) {
+        return percentuaisStr.map((e) => double.tryParse(e) ?? 0).toList();
+      }
+    } catch (e) {
+      print('❌ Erro ao carregar percentuais de rebalanceamento: $e');
+    }
+    return null;
   }
 } 

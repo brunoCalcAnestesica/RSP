@@ -55,7 +55,6 @@ class GraficoBolsa extends StatelessWidget {
     }
 
     return Container(
-      height: 200,
       margin: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surface,
@@ -64,96 +63,23 @@ class GraficoBolsa extends StatelessWidget {
           color: Theme.of(context).colorScheme.outline.withOpacity(0.2),
         ),
       ),
-      child: Row(
+      child: Column(
         children: [
-          // Gráfico de pizza
-          Expanded(
-            flex: 2,
-            child: Stack(
-              alignment: Alignment.center,
-              children: [
-                                 CustomPaint(
-                   size: const Size(150, 150),
-                   painter: PizzaChartPainter(
-                     classesComValor: classesComValor,
-                     valorTotal: valorTotal,
-                     classes: classes,
-                   ),
-                 ),
-                // Valor total no centro
-                Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      'R\$ ${_formatarValor(valorTotal)}',
-                      style: const TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    const Text(
-                      'Total',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: Colors.grey,
-                      ),
-                    ),
-                  ],
+          // Gráfico centralizado
+          Padding(
+            padding: const EdgeInsets.only(left: 8, right: 8, bottom: 16, top: 8),
+            child: AspectRatio(
+              aspectRatio: 1.5,
+              child: Center(
+                child: CustomPaint(
+                  size: const Size(300, 300),
+                  painter: PizzaChartPainter(
+                    classesComValor: classesComValor,
+                    valorTotal: valorTotal,
+                    classes: classes,
+                    context: context,
+                  ),
                 ),
-              ],
-            ),
-          ),
-          // Legenda
-          Expanded(
-            flex: 1,
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: classesComValor.map((entry) {
-                  final classe = classes.firstWhere((c) => c.nome == entry.key);
-                  final valor = entry.value;
-                  final percentual = valorTotal > 0 ? (valor / valorTotal) * 100 : 0;
-                  
-                  return Padding(
-                    padding: const EdgeInsets.only(bottom: 8),
-                    child: Row(
-                      children: [
-                        Container(
-                          width: 12,
-                          height: 12,
-                          decoration: BoxDecoration(
-                            color: classe.cor,
-                            shape: BoxShape.circle,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                classe.nome,
-                                style: const TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w500,
-                                ),
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                              Text(
-                                'R\$ ${_formatarValor(valor)} (${percentual.toStringAsFixed(1)}%)',
-                                style: TextStyle(
-                                  fontSize: 10,
-                                  color: Colors.grey[600],
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                  );
-                }).toList(),
               ),
             ),
           ),
@@ -196,15 +122,29 @@ class GraficoBolsa extends StatelessWidget {
   }
 }
 
+String formatarCompacto(double valor) {
+  if (valor.abs() >= 1e9) {
+    return (valor / 1e9).toStringAsFixed(2).replaceAll('.', ',') + ' Bi';
+  } else if (valor.abs() >= 1e6) {
+    return (valor / 1e6).toStringAsFixed(2).replaceAll('.', ',') + ' Mi';
+  } else if (valor.abs() >= 1e3) {
+    return (valor / 1e3).toStringAsFixed(2).replaceAll('.', ',') + ' K';
+  } else {
+    return valor.toStringAsFixed(0);
+  }
+}
+
 class PizzaChartPainter extends CustomPainter {
   final List<MapEntry<String, double>> classesComValor;
   final double valorTotal;
   final List<ClasseAtivo> classes;
+  final BuildContext context;
 
   PizzaChartPainter({
     required this.classesComValor,
     required this.valorTotal,
     required this.classes,
+    required this.context,
   });
 
   @override
@@ -237,6 +177,50 @@ class PizzaChartPainter extends CustomPainter {
 
       startAngle += sweepAngle;
     }
+
+    // Desenhar o círculo central para criar o efeito de rosquinha
+    final donutRadius = radius * 0.75; // Furo ainda maior, rosquinha mais fina
+    final donutPaint = Paint()
+      ..color = Theme.of(context).colorScheme.surface // Cor de fundo do card
+      ..style = PaintingStyle.fill;
+    canvas.drawCircle(center, donutRadius, donutPaint);
+
+    // Desenhar o valor total centralizado
+    final textSpan = TextSpan(
+      text: 'R\$ ${formatarCompacto(valorTotal)}',
+      style: const TextStyle(
+        fontSize: 22,
+        fontWeight: FontWeight.bold,
+        color: Colors.white,
+      ),
+    );
+    final textPainter = TextPainter(
+      text: textSpan,
+      textAlign: TextAlign.center,
+      textDirection: TextDirection.ltr,
+    );
+    textPainter.layout(minWidth: 0, maxWidth: size.width * 0.7);
+    final offset = Offset(center.dx - textPainter.width / 2, center.dy - textPainter.height / 2 - 10);
+    textPainter.paint(canvas, offset);
+
+    // Desenhar o texto "Total" abaixo do valor
+    final totalSpan = const TextSpan(
+      text: 'Total',
+      style: TextStyle(
+        fontSize: 13,
+        color: Colors.grey,
+        fontWeight: FontWeight.w400,
+      ),
+    );
+    final totalPainter = TextPainter(
+      text: totalSpan,
+      textAlign: TextAlign.center,
+      textDirection: TextDirection.ltr,
+    );
+    totalPainter.layout(minWidth: 0, maxWidth: size.width * 0.7);
+    // Aumentar o espaçamento vertical para evitar sobreposição
+    final totalOffset = Offset(center.dx - totalPainter.width / 2, center.dy + textPainter.height / 2 + 8);
+    totalPainter.paint(canvas, totalOffset);
   }
 
   Color _getCorClasse(String nomeClasse) {

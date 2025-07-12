@@ -133,4 +133,28 @@ class GoogleSheetsService {
       print('Erro ao debug: $e');
     }
   }
+
+  static const String _ativosSheetName = 'ATIVOS';
+  static String get _ativosBaseUrl => 'https://opensheet.elk.sh/$_spreadsheetId/$_ativosSheetName';
+
+  // Buscar todos os tickers únicos da aba ATIVOS
+  static Future<List<String>> getAtivosTickers() async {
+    try {
+      final response = await http.get(Uri.parse(_ativosBaseUrl));
+      if (response.statusCode == 200) {
+        final List<dynamic> data = json.decode(response.body);
+        final tickers = <String>{};
+        for (var item in data) {
+          if (item['TICKER'] != null && item['TICKER'].toString().isNotEmpty) {
+            tickers.add(item['TICKER'].toString().toUpperCase());
+          }
+        }
+        return tickers.toList();
+      } else {
+        throw Exception('Falha ao carregar tickers da planilha: ${response.statusCode}');
+      }
+    } catch (e) {
+      throw Exception('Erro ao conectar com a planilha de ativos: $e');
+    }
+  }
 } 
