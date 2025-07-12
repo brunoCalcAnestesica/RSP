@@ -1,7 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import '../../services/data_cache_service.dart';
-import '../../api/ativos_cache_service.dart';
 import '../auth/login_screen.dart';
 import '../../main.dart';
 
@@ -52,41 +50,12 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
 
   Future<void> _initializeApp() async {
     try {
-      // Passo 1: Inicializar cache de dados de usuários
-      setState(() {
-        _statusText = 'Carregando dados de usuários...';
-        _progress = 0.2;
-      });
-      
-      await DataCacheService.initialize();
-      
-      setState(() {
-        _statusText = 'Dados de usuários carregados!';
-        _progress = 0.4;
-      });
-      
-      // Passo 2: Inicializar cache de dados de ativos
-      setState(() {
-        _statusText = 'Carregando dados de ativos...';
-        _progress = 0.6;
-      });
-      
-      await AtivosCacheService.initialize();
-      
-      setState(() {
-        _statusText = 'Dados carregados com sucesso!';
-        _progress = 0.8;
-      });
-      
-      // Pequena pausa para mostrar o status
-      await Future.delayed(const Duration(milliseconds: 500));
-      
+      // Verificar se usuário está logado (sem requisições desnecessárias)
       setState(() {
         _statusText = 'Verificando login...';
-        _progress = 0.8;
+        _progress = 0.5;
       });
       
-      // Verificar se usuário está logado
       final prefs = await SharedPreferences.getInstance();
       final isLoggedIn = prefs.getBool('isLoggedIn') ?? false;
       
@@ -95,10 +64,7 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
         _progress = 1.0;
       });
       
-      // Pequena pausa final
-      await Future.delayed(const Duration(milliseconds: 500));
-      
-      // Navegar para a tela apropriada
+      // Navegar para a tela apropriada imediatamente
       if (mounted) {
         if (isLoggedIn) {
           Navigator.of(context).pushReplacement(
@@ -113,12 +79,7 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
       
     } catch (e) {
       print('❌ Erro na inicialização: $e');
-      setState(() {
-        _statusText = 'Erro na inicialização: $e';
-      });
-      
-      // Mesmo com erro, tentar navegar para login após um tempo
-      await Future.delayed(const Duration(seconds: 2));
+      // Mesmo com erro, navegar para login
       if (mounted) {
         Navigator.of(context).pushReplacement(
           MaterialPageRoute(builder: (context) => const LoginScreen()),
@@ -236,42 +197,7 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
                     
                     const SizedBox(height: 40),
                     
-                    // Informações do cache
-                    FutureBuilder<Map<String, dynamic>>(
-                      future: Future.value(DataCacheService.getCacheInfo()),
-                      builder: (context, snapshot) {
-                        if (snapshot.hasData) {
-                          final info = snapshot.data!;
-                          return Container(
-                            padding: const EdgeInsets.all(16),
-                            decoration: BoxDecoration(
-                              color: Colors.white.withOpacity(0.1),
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: Column(
-                              children: [
-                                Text(
-                                  'Usuários em cache: ${info['usersCount']}',
-                                  style: TextStyle(
-                                    color: secondaryTextColor,
-                                    fontSize: 12,
-                                  ),
-                                ),
-                                if (info['lastUpdate'] != null)
-                                  Text(
-                                    'Última atualização: ${DateTime.parse(info['lastUpdate']).toString().substring(11, 19)}',
-                                    style: TextStyle(
-                                      color: secondaryTextColor,
-                                      fontSize: 12,
-                                    ),
-                                  ),
-                              ],
-                            ),
-                          );
-                        }
-                        return const SizedBox.shrink();
-                      },
-                    ),
+                    // Remover informações do cache para acelerar o carregamento
                   ],
                 ),
               ),

@@ -36,15 +36,7 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   Future<void> _loadSavedCredentials() async {
-    final credentials = await AuthService.getSavedCredentials();
-    
-    if (credentials['email']?.isNotEmpty == true) {
-      setState(() {
-        _emailController.text = credentials['email']!;
-        _passwordController.text = credentials['password']!;
-        _rememberMe = true;
-      });
-    }
+    // Removido pois não há mais credenciais salvas no novo AuthService
   }
 
   @override
@@ -306,8 +298,8 @@ class _LoginScreenState extends State<LoginScreen> {
       });
 
       try {
-        // Autenticar usando o cache
-        final user = await DataCacheService.authenticateUser(
+        // Autenticar usando o AuthService
+        final user = await AuthService.authenticateUser(
           _emailController.text.trim(),
           _passwordController.text.trim(),
         );
@@ -317,14 +309,10 @@ class _LoginScreenState extends State<LoginScreen> {
         });
 
         if (user != null) {
-          // Salvar dados de login usando AuthService
-          await AuthService.saveLoginData(
-            nome: user['nome'],
-            email: user['email'],
-            telefone: user['telefone'],
-            savedEmail: _rememberMe ? _emailController.text.trim() : null,
-            savedPassword: _rememberMe ? _passwordController.text.trim() : null,
-            rememberMe: _rememberMe,
+          // Fazer login usando AuthService
+          await AuthService.login(
+            _emailController.text.trim(),
+            _passwordController.text.trim(),
           );
 
           // Login bem-sucedido

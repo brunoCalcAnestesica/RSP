@@ -1,7 +1,8 @@
 import 'dart:convert';
 import 'dart:async';
 import 'package:shared_preferences/shared_preferences.dart';
-import '../api/google_sheets_service.dart';
+import 'auth_service.dart';
+import 'package:http/http.dart' as http;
 
 class DataCacheService {
   static const String _usersCacheKey = 'cached_users';
@@ -86,11 +87,11 @@ class DataCacheService {
     }
   }
 
-  // Atualizar dados da planilha
+  // Atualizar dados de usuários
   static Future<void> _updateData() async {
     try {
-      print('📡 Atualizando dados da planilha...');
-      final users = await GoogleSheetsService.getUsers();
+      print('📡 Atualizando dados de usuários...');
+      final users = await AuthService.getUsers();
       _cachedUsers = users;
       await _saveToCache();
       print('✅ Dados atualizados com sucesso!');
@@ -203,5 +204,36 @@ class DataCacheService {
       'lastUpdate': _lastUpdate?.toIso8601String(),
       'isValid': !_shouldUpdate(),
     };
+  }
+} 
+
+class TwelveDataService {
+  static const String apiKey = '80def4ab34e84758998a8ad4e0fbe26d';
+  static const List<String> tickers = [
+    'BBAS3.SA','BBDC4.SA','TAEE11.SA','ISAE4.SA','SAPR11.SA','SBSP3.SA','TIMS3.SA','VIVT3.SA','TGMA3.SA','RAIL3.SA','BBSE3.SA','PSSA3.SA','SLCE3.SA','AGRO3.SA','PETR4.SA','VALE3.SA','XPLG11.SA','VILG11.SA','HGLG11.SA','JSRE11.SA','HGRE11.SA','PVBI11.SA','VISC11.SA','XPML11.SA','RVBI11.SA','MALL11.SA','KNCR11.SA','RBRR11.SA','KNIP11.SA','CPTS11.SA','HGRU11.SA','TRXF11.SA','VINO11.SA','IVVB11.SA','USDB11.SA','BND.SA','WRLD11.SA','BNDX11.SA','ALUG11.SA','XINA11.SA','BTC/BRL','USDT/BRL'
+  ];
+
+  static Future<Map<String, double>> fetchPrices() async {
+    final Map<String, double> prices = {};
+    // Twelve Data permite até 8 símbolos por requisição
+    for (int i = 0; i < tickers.length; i += 8) {
+      final batch = tickers.skip(i).take(8).join(',');
+      final url = 'https://api.twelvedata.com/price?symbol=$batch&apikey=$apiKey';
+      final response = await http.get(Uri.parse(url));
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        if (data is Map<String, dynamic>) {
+          data.forEach((symbol, value) {
+            if (value is Map && value['price'] != null) {
+              prices[symbol] = double.tryParse(value['price'].toString().replaceAll(',', '.')) ?? 0;
+            }
+          });
+        } else if (data['price'] != null && batch.split(',').length == 1) {
+          // Caso de apenas 1 símbolo
+          prices[batch] = double.tryParse(data['price'].toString().replaceAll(',', '.')) ?? 0;
+        }
+      }
+    }
+    return prices;
   }
 } 

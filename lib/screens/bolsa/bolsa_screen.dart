@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import '../configuracoes/configuracoes_screen.dart';
-import '../../api/ativos_cache_service.dart';
-import '../../api/google_sheets_service.dart';
+import '../../api/twelve_data_service.dart';
 import '../../models/ativo.dart';
 import '../../services/bolsa_storage_service.dart';
 import 'package:flutter_colorpicker/flutter_colorpicker.dart';
@@ -11,6 +10,9 @@ import 'grafico_bolsa.dart';
 import 'rebalance.dart';
 import 'package:intl/intl.dart';
 import 'bolsa_historico.dart';
+import 'dart:convert'; // Importa para json
+import 'package:http/http.dart' as http; // Importa para http
+import '../../services/data_cache_service.dart' as cache;
 
 class BolsaScreen extends StatefulWidget {
   const BolsaScreen({super.key});
@@ -23,6 +25,7 @@ class _BolsaScreenState extends State<BolsaScreen> {
   List<Ativo> _ativos = [];
   List<Ativo> _ativosFiltrados = [];
   bool _isLoading = true;
+  bool _isUpdatingPrices = false; // Loading state para atualizações
   String _searchQuery = '';
   String _selectedFilter = 'Todos';
   Set<String> _expandedCards = {};
@@ -31,7 +34,11 @@ class _BolsaScreenState extends State<BolsaScreen> {
   final PageController _carouselController = PageController();
   int _currentPage = 0;
   List<String> _tickersDisponiveis = [];
+  List<Map<String, dynamic>> _ativosDisponiveis = [];
   bool _isLoadingTickers = false;
+  Timer? _twelveDataTimer;
+  Timer? _classeCicloTimer;
+  int _classeTimerIndex = 0; // Adicionar índice para controlar o ciclo
 
   // Adicione uma lista de classes disponíveis
   List<ClasseAtivo> _classes = [
@@ -51,13 +58,18 @@ class _BolsaScreenState extends State<BolsaScreen> {
     super.initState();
     _loadAtivos();
     _startAutoUpdateTimer();
-    _loadTickersFromPlanilha();
+    _loadTickersFromAPI();
+    _startTwelveDataTimer();
+    // Remover atualização inicial de preços - será feita pelo timer cíclico
+    _startClasseCicloTimer();
   }
 
   @override
   void dispose() {
     _autoUpdateTimer?.cancel();
     _carouselController.dispose();
+    _twelveDataTimer?.cancel();
+    _classeCicloTimer?.cancel();
     super.dispose();
   }
 
@@ -76,8 +88,8 @@ class _BolsaScreenState extends State<BolsaScreen> {
         _isLoading = false;
       });
       
-      // Atualizar preços após o carregamento inicial
-      await _atualizarPrecosAtuais();
+      // Não importar todos os ativos da API - apenas carregar os que já estão salvos
+      // Os ativos serão adicionados apenas quando o usuário adicionar manualmente
     } catch (e) {
       setState(() {
         _isLoading = false;
@@ -108,22 +120,198 @@ class _BolsaScreenState extends State<BolsaScreen> {
     });
   }
 
+  Widget _buildClassesList() {
+    // Verificar se há ativos em alguma classe
+    final hasAtivos = _classes.any((classe) => classe.ativos.isNotEmpty);
+    
+    if (!hasAtivos) {
+      return _buildEmptyState();
+    }
+
+    return ListView(
+      children: [
+        ..._classes.map((classe) {
+          return ExpansionTile(
+            leading: CircleAvatar(
+              backgroundColor: classe.cor.withOpacity(0.15),
+              child: Icon(classe.icone, color: classe.cor),
+            ),
+            title: Text(
+              classe.nome,
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: classe.cor),
+            ),
+            subtitle: Padding(
+              padding: const EdgeInsets.only(top: 4.0),
+              child: Text(
+                'Mercado: ' + formatarReais(_valorTotalMercado(classe)),
+                style: TextStyle(fontSize: 13, color: classe.cor, fontWeight: FontWeight.bold),
+              ),
+            ),
+            children: [
+              ...classe.ativos.map((ativo) => _buildAtivoCard(ativo)).toList(),
+              TextButton.icon(
+                onPressed: () => _showAddAtivoDialog(classe),
+                icon: const Icon(Icons.add),
+                label: const Text('Adicionar Ativo'),
+              ),
+            ],
+          );
+        }).toList(),
+        RebalanceContainer(classes: _classes),
+      ],
+    );
+  }
+
+  Widget _buildEmptyState() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(
+            Icons.account_balance_wallet_outlined,
+            size: 80,
+            color: Colors.grey[400],
+          ),
+          const SizedBox(height: 16),
+          Text(
+            'Nenhum ativo adicionado',
+            style: TextStyle(
+              fontSize: 20,
+              fontWeight: FontWeight.bold,
+              color: Colors.grey[600],
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Adicione seus primeiros ativos para começar',
+            style: TextStyle(
+              fontSize: 16,
+              color: Colors.grey[500],
+            ),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 24),
+          ElevatedButton.icon(
+            onPressed: () {
+              if (_classes.isNotEmpty) {
+                _showAddAtivoDialog(_classes.first);
+              }
+            },
+            icon: const Icon(Icons.add),
+            label: const Text('Adicionar Primeiro Ativo'),
+            style: ElevatedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Função para atualizar apenas os ativos do usuário
+  Future<void> _atualizarMeusAtivos() async {
+    setState(() {
+      _isUpdatingPrices = true;
+    });
+
+    try {
+      // Coletar todos os ativos das classes que o usuário possui
+      final List<Ativo> ativosDasClasses = [];
+      for (var classe in _classes) {
+        for (var ativo in classe.ativos) {
+          final qtd = double.tryParse(ativo.quantidade.replaceAll(',', '.')) ?? 0;
+          if (qtd > 0) {
+            ativosDasClasses.add(ativo);
+          }
+        }
+      }
+
+      if (ativosDasClasses.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('❌ Você não possui ativos nas classes para atualizar'),
+            backgroundColor: Colors.orange,
+            duration: Duration(seconds: 2),
+          ),
+        );
+        return;
+      }
+
+      final tickers = ativosDasClasses.map((a) => a.ticker).toList();
+      print('🔄 Atualizando ${tickers.length} ativos das classes: ${tickers.join(', ')}');
+      
+      final prices = await TwelveDataService.getPrecosEmLote(tickers);
+      
+      if (mounted) {
+        setState(() {
+          // Atualizar preços apenas nas classes
+          for (var classe in _classes) {
+            for (var ativo in classe.ativos) {
+              if (prices.containsKey(ativo.ticker)) {
+                ativo.precoAtual = prices[ativo.ticker]!.toStringAsFixed(2).replaceAll('.', ',');
+              }
+            }
+          }
+        });
+
+        // Mostrar resultado
+        final ativosAtualizados = prices.length;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('✅ ${ativosAtualizados} ativos das classes atualizados'),
+            backgroundColor: Colors.green,
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+    } catch (e) {
+      print('❌ Erro ao atualizar ativos das classes: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('❌ Erro ao atualizar: $e'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isUpdatingPrices = false;
+        });
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Bolsa'),
+        title: Row(
+          children: [
+            const Text('Bolsa'),
+            if (_isUpdatingPrices) ...[
+              const SizedBox(width: 8),
+              const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            ],
+          ],
+        ),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Atualizar Meus Ativos',
+            onPressed: () => _atualizarMeusAtivos(),
+          ),
           IconButton(
             icon: const Icon(Icons.category),
             tooltip: 'Gerenciar Classes',
             onPressed: _showGerenciarClassesDialog,
-          ),
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            tooltip: 'Atualizar Preços',
-            onPressed: () => _atualizarPrecosAtuais(isManual: true),
           ),
           IconButton(
             icon: const Icon(Icons.settings),
@@ -139,10 +327,20 @@ class _BolsaScreenState extends State<BolsaScreen> {
       ),
       body: _isLoading
           ? const Center(child: CircularProgressIndicator())
-          : GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: () => FocusScope.of(context).unfocus(),
-              child: Column(
+          : RefreshIndicator(
+              onRefresh: () async {
+                setState(() {
+                  _isUpdatingPrices = true;
+                });
+                await _atualizarPrecosAtuais(isManual: true);
+                setState(() {
+                  _isUpdatingPrices = false;
+                });
+              },
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => FocusScope.of(context).unfocus(),
+                child: Column(
                 children: [
                   // Carrossel com gráfico e histórico
                   Container(
@@ -167,7 +365,7 @@ class _BolsaScreenState extends State<BolsaScreen> {
                     padding: const EdgeInsets.symmetric(vertical: 8.0),
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
+                        children: [
                         Container(
                           width: 8,
                           height: 8,
@@ -184,53 +382,23 @@ class _BolsaScreenState extends State<BolsaScreen> {
                           decoration: BoxDecoration(
                             shape: BoxShape.circle,
                             color: _currentPage == 1 ? Colors.blue : Colors.grey.withOpacity(0.3),
+                                ),
+                              ),
+                            ],
                           ),
-                        ),
-                      ],
-                    ),
                   ),
                   // Remover qualquer Padding/Wrap/ListView/Chip relacionado a _tickersDisponiveis na tela principal
                   // Lista de classes
                   Expanded(
                       child: Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 16.0),
-                      child: ListView(
-                          children: [
-                          ..._classes.map((classe) {
-                            return ExpansionTile(
-                              leading: CircleAvatar(
-                                backgroundColor: classe.cor.withOpacity(0.15),
-                                child: Icon(classe.icone, color: classe.cor),
-                              ),
-                              title: Text(
-                                classe.nome,
-                                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: classe.cor),
-                              ),
-                              subtitle: Padding(
-                                padding: const EdgeInsets.only(top: 4.0),
-                                child: Text(
-                                  'Mercado: ' + formatarReais(_valorTotalMercado(classe)),
-                                  style: TextStyle(fontSize: 13, color: classe.cor, fontWeight: FontWeight.bold),
-                                ),
-                              ),
-                                        children: [
-                                ...classe.ativos.map((ativo) => _buildAtivoCard(ativo)).toList(),
-                                TextButton.icon(
-                                  onPressed: () => _showAddAtivoDialog(classe),
-                                  icon: const Icon(Icons.add),
-                                  label: const Text('Adicionar Ativo'),
-                                ),
-                              ],
-                            );
-                          }).toList(),
-                          RebalanceContainer(classes: _classes),
-                        ],
-                      ),
+                      child: _buildClassesList(),
                     ),
                   ),
                 ],
               ),
             ),
+          ),
     );
   }
 
@@ -345,15 +513,12 @@ class _BolsaScreenState extends State<BolsaScreen> {
     final preco = ativo.precoAtual;
     final precoMedio = ativo.precoMedio;
 
-    // Verificar se o ticker existe na planilha (tem preço atual válido)
-    final double? precoAtualNum = double.tryParse(preco.replaceAll(',', '.')) ?? 0;
-    final bool tickerExisteNaPlanilha = preco.isNotEmpty && 
-                                       preco != '0,00' && 
-                                       preco != '0.00' && 
-                                       (precoAtualNum ?? 0) > 0;
-    
-    // Debug para verificar a detecção
-    print('🔍 Ticker: $ticker | Preço: "$preco" | Existe na planilha: $tickerExisteNaPlanilha');
+    // Verificar se o ticker tem preço atual válido
+    final double? precoAtualNum = _parsePreco(preco);
+    final bool tickerTemPreco = preco.isNotEmpty && 
+                                preco != '0,00' && 
+                                preco != '0.00' && 
+                                (precoAtualNum ?? 0) > 0;
 
     // Cálculos
     final double? quantidadeNum = double.tryParse(quantidade.replaceAll(',', '.')) ?? 0;
@@ -393,10 +558,10 @@ class _BolsaScreenState extends State<BolsaScreen> {
       child: Padding(
           padding: const EdgeInsets.all(16.0),
           child: isExpanded 
-            ? (tickerExisteNaPlanilha 
-                ? _buildExpandedCard(ticker, quantidade, preco, precoMedio, quantidadeNum, valorPago, valorMercado, diferenca, percentual, diffColor, precoMedioNum ?? 0)
-                : _buildExpandedCardSimplificado(ticker, quantidade, precoMedio, quantidadeNum, valorPago, precoMedioNum ?? 0))
-            : (tickerExisteNaPlanilha 
+            ? (tickerTemPreco 
+                ? _buildExpandedCard(ticker, quantidade, preco, precoMedio, quantidadeNum ?? 0, valorPago, valorMercado, diferenca, percentual, diffColor, precoMedioNum ?? 0)
+                : _buildExpandedCardSimplificado(ticker, quantidade, precoMedio, quantidadeNum ?? 0, valorPago, precoMedioNum ?? 0))
+            : (tickerTemPreco 
                 ? _buildCollapsedCard(ticker, preco, diferenca, percentual, diffColor)
                 : _buildCollapsedCardSimplificado(ticker, quantidade, precoMedio)),
         ),
@@ -833,7 +998,10 @@ class _BolsaScreenState extends State<BolsaScreen> {
                     labelText: 'Quantidade',
                     border: OutlineInputBorder(),
                   ),
-                  keyboardType: TextInputType.number,
+                  keyboardType: TextInputType.numberWithOptions(decimal: true),
+                  inputFormatters: [
+                    FilteringTextInputFormatter.allow(RegExp(r'[0-9,.]')),
+                  ],
                 ),
                 const SizedBox(height: 16),
                 _buildMonetaryField(
@@ -912,7 +1080,7 @@ class _BolsaScreenState extends State<BolsaScreen> {
           ticker: ativoOriginal.ticker,
           quantidade: novosDados['QUANTIDADE'] ?? '',
           precoMedio: novosDados['PREÇO MÉDIO'] ?? '',
-          precoAtual: novosDados['PREÇO ATUAL'] ?? '',
+          precoAtual: '0,00', // Garantir que o preço atual seja 0,00
         );
         
         // Atualizar também na lista filtrada
@@ -922,7 +1090,7 @@ class _BolsaScreenState extends State<BolsaScreen> {
             ticker: ativoOriginal.ticker,
             quantidade: novosDados['QUANTIDADE'] ?? '',
             precoMedio: novosDados['PREÇO MÉDIO'] ?? '',
-            precoAtual: novosDados['PREÇO ATUAL'] ?? '',
+            precoAtual: '0,00', // Garantir que o preço atual seja 0,00
           );
         }
       }
@@ -993,13 +1161,12 @@ class _BolsaScreenState extends State<BolsaScreen> {
   }
 
   void _addAtivo(Map<String, dynamic> dadosEditaveis) {
-    // Como não podemos adicionar ativos sem dados da planilha,
-    // vamos mostrar uma mensagem informativa
+    // Implementar adição de ativo diretamente no app
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
-        content: Text('Para adicionar novos ativos, use a planilha Google Sheets. Aqui você pode apenas editar dados específicos do app.'),
-        backgroundColor: Colors.orange,
-        duration: Duration(seconds: 4),
+        content: Text('Funcionalidade de adicionar ativo será implementada em breve.'),
+        backgroundColor: Colors.blue,
+        duration: Duration(seconds: 2),
       ),
     );
   }
@@ -1010,16 +1177,16 @@ class _BolsaScreenState extends State<BolsaScreen> {
     for (var ativo in classe.ativos) {
       final quantidade = double.tryParse(ativo.quantidade.replaceAll(',', '.')) ?? 0;
       final precoMedio = double.tryParse(ativo.precoMedio.replaceAll(',', '.')) ?? 0;
-      final precoAtual = double.tryParse(ativo.precoAtual.replaceAll(',', '.')) ?? 0;
+      final precoAtual = _parsePreco(ativo.precoAtual);
       
-      // Verificar se o ticker existe na planilha (tem preço atual válido)
-      final bool tickerExisteNaPlanilha = ativo.precoAtual.isNotEmpty && 
-                                         ativo.precoAtual != '0,00' && 
-                                         ativo.precoAtual != '0.00' && 
-                                         (precoAtual) > 0;
+      // Verificar se o ticker tem preço atual válido
+      final bool tickerTemPreco = ativo.precoAtual.isNotEmpty && 
+                                  ativo.precoAtual != '0,00' && 
+                                  ativo.precoAtual != '0.00' && 
+                                  (precoAtual) > 0;
       
-      // Se o ticker não está na planilha, usar preço médio
-      if (tickerExisteNaPlanilha) {
+      // Se o ticker tem preço atual, usar ele
+      if (tickerTemPreco) {
         total += quantidade * precoAtual;
       } else {
         total += quantidade * precoMedio;
@@ -1032,6 +1199,10 @@ class _BolsaScreenState extends State<BolsaScreen> {
   String formatarReais(double valor) {
     final formatador = NumberFormat.simpleCurrency(locale: 'pt_BR', decimalDigits: 2);
     return formatador.format(valor);
+  }
+
+  double _parsePreco(String preco) {
+    return double.tryParse(preco.replaceAll('.', '').replaceAll(',', '.')) ?? 0;
   }
 
   // 3. Método para mostrar o diálogo de gerenciamento de classes
@@ -1461,14 +1632,15 @@ class _BolsaScreenState extends State<BolsaScreen> {
     );
   }
 
-  Future<void> _loadTickersFromPlanilha() async {
+  Future<void> _loadTickersFromAPI() async {
     setState(() {
       _isLoadingTickers = true;
     });
     try {
-      final tickers = await GoogleSheetsService.getAtivosTickers();
+      final ativos = await TwelveDataService.getAtivos();
       setState(() {
-        _tickersDisponiveis = tickers;
+        _ativosDisponiveis = ativos;
+        _tickersDisponiveis = ativos.map((a) => a['ticker'].toString()).toList();
         _isLoadingTickers = false;
       });
     } catch (e) {
@@ -1477,9 +1649,24 @@ class _BolsaScreenState extends State<BolsaScreen> {
       });
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Erro ao carregar tickers: $e'), backgroundColor: Colors.red),
+          SnackBar(content: Text('Erro ao carregar ativos: $e'), backgroundColor: Colors.red),
         );
       }
+    }
+  }
+
+  Color _getTipoColor(String tipo) {
+    switch (tipo) {
+      case 'Ação':
+        return Colors.blue;
+      case 'FII':
+        return Colors.purple;
+      case 'ETF':
+        return Colors.orange;
+      case 'Cripto':
+        return Colors.amber;
+      default:
+        return Colors.grey;
     }
   }
 
@@ -1491,7 +1678,7 @@ class _BolsaScreenState extends State<BolsaScreen> {
         barrierDismissible: false,
         builder: (context) => const Center(child: CircularProgressIndicator()),
       );
-      await _loadTickersFromPlanilha();
+      await _loadTickersFromAPI();
       Navigator.of(context).pop(); // Fecha o loading
     }
     final precoController = TextEditingController(text: '0,00');
@@ -1524,7 +1711,10 @@ class _BolsaScreenState extends State<BolsaScreen> {
                     labelText: 'Quantidade',
                     border: OutlineInputBorder(),
                   ),
-                  keyboardType: TextInputType.number,
+                  keyboardType: TextInputType.numberWithOptions(decimal: true),
+                  inputFormatters: [
+                    FilteringTextInputFormatter.allow(RegExp(r'[0-9,.]')),
+                  ],
                 ),
                 const SizedBox(height: 16),
                 _buildMonetaryField(
@@ -1533,22 +1723,69 @@ class _BolsaScreenState extends State<BolsaScreen> {
                   hint: '0,00',
                 ),
                 const SizedBox(height: 16),
-                Autocomplete<String>(
+                Autocomplete<Map<String, dynamic>>(
                   optionsBuilder: (TextEditingValue textEditingValue) {
-                    return _tickersDisponiveis.where((String option) {
-                      return option.toLowerCase().contains(textEditingValue.text.toLowerCase());
-                    });
+                    if (textEditingValue.text.isEmpty) {
+                      return _ativosDisponiveis.take(10).toList();
+                    }
+                    return _ativosDisponiveis.where((ativo) {
+                      final ticker = ativo['ticker'].toString().toLowerCase();
+                      final nome = ativo['nome'].toString().toLowerCase();
+                      final searchText = textEditingValue.text.toLowerCase();
+                      return ticker.contains(searchText) || nome.contains(searchText);
+                    }).take(15).toList();
                   },
-                  onSelected: (String selection) {
-                    tickerSelecionado = selection;
+                  displayStringForOption: (Map<String, dynamic> option) => option['ticker'],
+                  onSelected: (Map<String, dynamic> selection) {
+                    tickerSelecionado = selection['ticker'];
+                  },
+                  optionsViewBuilder: (context, onSelected, options) {
+                    return Material(
+                      elevation: 4.0,
+                      child: Container(
+                        constraints: const BoxConstraints(maxHeight: 300),
+                        child: ListView.builder(
+                          padding: EdgeInsets.zero,
+                          itemCount: options.length,
+                          itemBuilder: (context, index) {
+                            final option = options.elementAt(index);
+                            return ListTile(
+                              title: Text(
+                                option['ticker'],
+                                style: const TextStyle(fontWeight: FontWeight.bold),
+                              ),
+                              subtitle: Text(option['nome']),
+                              trailing: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                decoration: BoxDecoration(
+                                  color: _getTipoColor(option['tipo']),
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                child: Text(
+                                  option['tipo'],
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ),
+                              onTap: () => onSelected(option),
+                            );
+                          },
+                        ),
+                      ),
+                    );
                   },
                   fieldViewBuilder: (context, controller, focusNode, onEditingComplete) {
                     return TextField(
                       controller: controller,
                       focusNode: focusNode,
                   decoration: const InputDecoration(
-                        labelText: 'Ticker',
+                        labelText: 'Buscar Ativo',
+                        hintText: 'Digite o ticker ou nome do ativo',
                     border: OutlineInputBorder(),
+                        prefixIcon: Icon(Icons.search),
                       ),
                       onChanged: (value) {
                         tickerSelecionado = value;
@@ -1566,7 +1803,7 @@ class _BolsaScreenState extends State<BolsaScreen> {
             ),
             ElevatedButton(
               onPressed: () {
-                final precoAtualNum = double.tryParse(precoController.text.replaceAll(',', '.')) ?? 0;
+                final precoAtualNum = _parsePreco(precoController.text);
                 final quantidade = double.tryParse(quantidadeController.text.replaceAll(',', '.')) ?? 0;
                 final precoMedioNum = double.tryParse(precoMedioController.text.replaceAll(',', '.')) ?? 0;
 
@@ -1604,40 +1841,63 @@ class _BolsaScreenState extends State<BolsaScreen> {
   }
 
   Future<void> _atualizarPrecosAtuais({bool isManual = false}) async {
-    try {
-      // Se for atualização manual, registrar o timestamp
-      if (isManual) {
-        _lastManualUpdate = DateTime.now();
-      } else {
-        // Se for automática, verificar se o usuário atualizou manualmente nos últimos 2 minutos
-        if (_lastManualUpdate != null) {
-          final difference = DateTime.now().difference(_lastManualUpdate!);
-          if (difference.inMinutes < 2) {
-            print('⏰ Atualização automática ignorada - usuário atualizou manualmente há ${difference.inMinutes} minutos');
-            return;
-          }
+    if (isManual) {
+      setState(() {
+        _isUpdatingPrices = true;
+      });
+      _lastManualUpdate = DateTime.now();
+    } else {
+      // Se for automática, verificar se o usuário atualizou manualmente nos últimos 2 minutos
+      if (_lastManualUpdate != null) {
+        final difference = DateTime.now().difference(_lastManualUpdate!);
+        if (difference.inMinutes < 2) {
+          print('⏰ Atualização automática ignorada - usuário atualizou manualmente há ${difference.inMinutes} minutos');
+          return;
         }
       }
+    }
 
-      final precosDaPlanilha = await AtivosCacheService.getAtivos();
-      final Map<String, String> mapaPrecos = {};
-      for (var map in precosDaPlanilha) {
-        final ticker = map['TICKER']?.toString()?.toUpperCase();
-        final precoAtual = map['PREÇO ATUAL']?.toString() ?? '';
-        if (ticker != null) {
-          mapaPrecos[ticker] = precoAtual;
-        }
+    try {
+      // Atualizar apenas ativos com quantidade > 0
+      final ativosComQuantidade = _ativos.where((a) {
+        final qtd = double.tryParse(a.quantidade.replaceAll(',', '.')) ?? 0;
+        return qtd > 0;
+      }).toList();
+      
+      if (ativosComQuantidade.isEmpty) {
+        print('📊 Nenhum ativo com quantidade para atualizar');
+        return;
       }
+      
+      final tickers = ativosComQuantidade.map((ativo) => ativo.ticker).toList();
+      print('📊 Atualizando ${tickers.length} ativos');
+      final prices = await TwelveDataService.getPrecosEmLote(tickers);
+      
       if (mounted) {
         setState(() {
           for (var classe in _classes) {
             for (var ativo in classe.ativos) {
-              if (mapaPrecos.containsKey(ativo.ticker)) {
-                ativo.precoAtual = mapaPrecos[ativo.ticker]!;
+              if (prices.containsKey(ativo.ticker)) {
+                ativo.precoAtual = prices[ativo.ticker]!.toStringAsFixed(2).replaceAll('.', ',');
               }
             }
           }
+          for (var ativo in _ativos) {
+            if (prices.containsKey(ativo.ticker)) {
+              ativo.precoAtual = prices[ativo.ticker]!.toStringAsFixed(2).replaceAll('.', ',');
+            }
+          }
         });
+        
+        if (isManual) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('✅ ${tickers.length} ativos atualizados'),
+              backgroundColor: Colors.green,
+              duration: const Duration(seconds: 2),
+            ),
+          );
+        }
       }
       
       if (isManual) {
@@ -1647,7 +1907,46 @@ class _BolsaScreenState extends State<BolsaScreen> {
       }
     } catch (e) {
       print('Erro ao atualizar preços: $e');
-      // Não mostrar erro ao usuário se for apenas atualização de preços
+      if (isManual && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('❌ Erro ao atualizar preços: $e'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    } finally {
+      if (isManual && mounted) {
+        setState(() {
+          _isUpdatingPrices = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _atualizarPrecosClasseSelecionada({bool isManual = false}) async {
+    if (_classeSelecionada == null) return;
+    try {
+      if (isManual) {
+        _lastManualUpdate = DateTime.now();
+      } else if (_lastManualUpdate != null) {
+        final difference = DateTime.now().difference(_lastManualUpdate!);
+        if (difference.inMinutes < 2) return;
+      }
+      final tickers = _classeSelecionada!.ativos.map((a) => a.ticker).toList();
+      final prices = await TwelveDataService.getPrecosEmLote(tickers);
+      if (mounted) {
+        setState(() {
+          for (var ativo in _classeSelecionada!.ativos) {
+            if (prices.containsKey(ativo.ticker)) {
+              ativo.precoAtual = prices[ativo.ticker]!.toStringAsFixed(2).replaceAll('.', ',');
+            }
+          }
+        });
+      }
+    } catch (e) {
+      print('Erro ao atualizar preços da classe: $e');
     }
   }
 
@@ -1655,6 +1954,55 @@ class _BolsaScreenState extends State<BolsaScreen> {
     _autoUpdateTimer = Timer.periodic(const Duration(minutes: 1), (timer) {
       _atualizarPrecosAtuais();
     });
+  }
+
+  void _startTwelveDataTimer() {
+    _twelveDataTimer = Timer.periodic(const Duration(minutes: 20), (timer) {
+      _updateTwelveDataPrices();
+    });
+  }
+
+  Future<void> _updateTwelveDataPrices() async {
+    try {
+      // Atualizar apenas ativos com quantidade > 0
+      final ativosComQuantidade = _ativos.where((a) {
+        final qtd = double.tryParse(a.quantidade.replaceAll(',', '.')) ?? 0;
+        return qtd > 0;
+      }).toList();
+      
+      if (ativosComQuantidade.isEmpty) {
+        print('📊 Nenhum ativo com quantidade para atualizar inicialmente');
+        return;
+      }
+      
+      final tickers = ativosComQuantidade.map((ativo) => ativo.ticker).toList();
+      print('📊 Atualizando ${tickers.length} ativos inicialmente');
+      final prices = await TwelveDataService.getPrecosEmLote(tickers);
+      
+      setState(() {
+        for (var classe in _classes) {
+          for (var ativo in classe.ativos) {
+            if (prices.containsKey(ativo.ticker)) {
+              ativo.precoAtual = prices[ativo.ticker]!.toStringAsFixed(2).replaceAll('.', ',');
+            }
+          }
+        }
+        for (var ativo in _ativos) {
+          if (prices.containsKey(ativo.ticker)) {
+            ativo.precoAtual = prices[ativo.ticker]!.toStringAsFixed(2).replaceAll('.', ',');
+          }
+        }
+      });
+    } catch (e) {
+      print('Erro ao atualizar preços via Twelve Data: $e');
+    }
+  }
+
+  String _getTwelveDataSymbol(String ticker) {
+    // Mapear tickers para o formato esperado pela API
+    if (ticker == 'BTC') return 'BTC/BRL';
+    if (ticker == 'USDT') return 'USDT/BRL';
+    return ticker.endsWith('.SA') ? ticker : ticker + '.SA';
   }
 
   Future<void> _saveData() async {
@@ -1879,7 +2227,51 @@ class _BolsaScreenState extends State<BolsaScreen> {
       ],
     );
   }
+
+  void _startClasseCicloTimer() {
+    _classeCicloTimer?.cancel();
+    _classeCicloTimer = Timer.periodic(const Duration(minutes: 5), (timer) {
+      if (_classes.isEmpty) return;
+      final idx = _classeTimerIndex % _classes.length;
+      final classe = _classes[idx];
+      print('⏰ Atualizando preços da classe: ${classe.nome}');
+      _atualizarPrecosPorClasse(classe);
+      _classeTimerIndex = (_classeTimerIndex + 1) % _classes.length;
+    });
+  }
+
+  Future<void> _atualizarPrecosPorClasse(ClasseAtivo classe) async {
+    try {
+      // Filtrar apenas ativos com quantidade > 0 (adicionados pelo usuário)
+      final ativosComQuantidade = classe.ativos.where((a) {
+        final qtd = double.tryParse(a.quantidade.replaceAll(',', '.')) ?? 0;
+        return qtd > 0;
+      }).toList();
+      
+      if (ativosComQuantidade.isEmpty) {
+        print('⏰ Nenhum ativo com quantidade na classe: ${classe.nome}');
+        return;
+      }
+      
+      final tickers = ativosComQuantidade.map((a) => a.ticker).toList();
+      print('⏰ Atualizando ${tickers.length} ativos da classe: ${classe.nome}');
+      final prices = await TwelveDataService.getPrecosEmLote(tickers);
+      
+      if (mounted) {
+        setState(() {
+          for (var ativo in ativosComQuantidade) {
+            if (prices.containsKey(ativo.ticker)) {
+              ativo.precoAtual = prices[ativo.ticker]!.toStringAsFixed(2).replaceAll('.', ',');
+            }
+          }
+        });
+      }
+    } catch (e) {
+      print('Erro ao atualizar preços da classe: $e');
+    }
+  }
 }
 
+ 
  
  

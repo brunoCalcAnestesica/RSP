@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import '../../api/google_sheets_service.dart';
+import '../../services/auth_service.dart';
 
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
@@ -272,7 +272,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   Future<void> _syncUserData() async {
     try {
-      final user = await GoogleSheetsService.getUserByEmail(_userEmail);
+      final user = await AuthService.getUserByEmail(_userEmail);
       if (user != null) {
         final prefs = await SharedPreferences.getInstance();
         await prefs.setString('userName', user['nome']);

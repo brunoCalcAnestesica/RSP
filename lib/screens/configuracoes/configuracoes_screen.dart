@@ -2,8 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../auth/login_screen.dart';
 import 'profile_screen.dart';
-import '../../services/data_cache_service.dart';
-import '../../api/ativos_cache_service.dart';
+import '../../services/data_cache_service.dart' as cache;
+import '../../api/twelve_data_service.dart';
 import '../../services/auth_service.dart';
 import '../../services/bolsa_storage_service.dart';
 
@@ -495,10 +495,10 @@ class _ConfiguracoesScreenState extends State<ConfiguracoesScreen> {
       );
       
       // Atualizar cache de usuários
-      await DataCacheService.forceUpdate();
+      await cache.DataCacheService.forceUpdate();
       
-      // Atualizar cache de ativos
-      await AtivosCacheService.forceUpdate();
+      // Limpar cache de preços da API Twelve Data
+      TwelveDataService.limparCache();
       
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -520,31 +520,49 @@ class _ConfiguracoesScreenState extends State<ConfiguracoesScreen> {
     }
   }
 
-  void _showCacheInfo() {
-    final usersInfo = DataCacheService.getCacheInfo();
-    final ativosInfo = AtivosCacheService.getCacheInfo();
+  void _showCacheInfo() async {
+    final usersInfo = cache.DataCacheService.getCacheInfo();
+    final ativosInfo = TwelveDataService.getEstatisticasUso();
+    final apiInfo = TwelveDataService.getInfoAPI();
+    
+    // Testar conexão com a API
+    final conexaoOk = await TwelveDataService.testarConexao();
     
     showDialog(
       context: context,
       builder: (BuildContext context) {
         return AlertDialog(
-          title: const Text('Informações do Cache'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('Usuários em cache: ${usersInfo['usersCount']}'),
-              const SizedBox(height: 8),
-              Text('Ativos em cache: ${ativosInfo['ativosCount']}'),
-              const SizedBox(height: 8),
-              if (usersInfo['lastUpdate'] != null)
-                Text('Última atualização usuários: ${DateTime.parse(usersInfo['lastUpdate']).toString().substring(0, 19)}'),
-              const SizedBox(height: 8),
-              if (ativosInfo['lastUpdate'] != null)
-                Text('Última atualização ativos: ${DateTime.parse(ativosInfo['lastUpdate']).toString().substring(0, 19)}'),
-              const SizedBox(height: 8),
-              Text('Cache válido: ${usersInfo['isValid'] && ativosInfo['isValid'] ? 'Sim' : 'Não'}'),
-            ],
+          title: const Text('Informações do Sistema'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'API Twelve Data',
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 16,
+                    color: conexaoOk ? Colors.green : Colors.red,
+                  ),
+                ),
+                Text('Status: ${conexaoOk ? 'Conectado' : 'Desconectado'}'),
+                Text('Requisições hoje: ${apiInfo['requisicoesUsadas']}/${apiInfo['limiteDiario']}'),
+                Text('Requisições restantes: ${apiInfo['requisicoesRestantes']}'),
+                Text('Itens em cache: ${apiInfo['itensEmCache']}'),
+                const SizedBox(height: 16),
+                Text(
+                  'Cache de Usuários',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 16,
+                  ),
+                ),
+                Text('Usuários em cache: ${usersInfo['usersCount']}'),
+                if (usersInfo['lastUpdate'] != null)
+                  Text('Última atualização: ${DateTime.parse(usersInfo['lastUpdate']).toString().substring(0, 19)}'),
+              ],
+            ),
           ),
           actions: [
             ElevatedButton(
